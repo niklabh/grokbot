@@ -46,7 +46,6 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000000000000000000005"
             BuildableName = "GrokWatch.app"
-            BlueprintName = "GrokWatch"
             ReferencedContainer = "container:GrokWatch.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -63,7 +62,6 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A10000000000000000000005"
             BuildableName = "GrokWatch.app"
-            BlueprintName = "GrokWatch"
             ReferencedContainer = "container:GrokWatch.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
