@@ -1,0 +1,7 @@
+.env
+GrokWatch/Secrets.swift
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.DS_Store
