@@ -4,8 +4,11 @@
 import base64
 import json
 import ssl
+import subprocess
+import sys
 import urllib.error
 import urllib.request
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -186,6 +189,180 @@ def finish_clip(key: str, name: str, request_id: str) -> None:
     raise RuntimeError(f"{name} timed out")
 
 
+def export_gif(source: Path, destination: Path) -> None:
+    """Key the white plate out of an mp4 and save a transparent GIF loop.
+
+    The watch can decode GIF and APNG, but not animated WebP. GIF stays small enough to ship.
+    """
+    probe = subprocess.check_output(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0", str(source),
+        ],
+        text=True,
+    ).strip()
+    width, height = (int(part) for part in probe.split(","))
+    target_width = 400
+    target_height = round(height * target_width / width)
+    frame_bytes = width * height * 3
+    process = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-i", str(source), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        stdout=subprocess.PIPE,
+    )
+    frames: list[Image.Image] = []
+    assert process.stdout is not None
+    index = 0
+    while True:
+        raw = process.stdout.read(frame_bytes)
+        if len(raw) < frame_bytes:
+            break
+        if index % 2 == 0:
+            keyed = keyed_frame(raw, width, height)
+            frames.append(keyed.resize((target_width, target_height), Image.Resampling.LANCZOS))
+        index += 1
+    process.wait()
+    if process.returncode != 0 or not frames:
+        raise RuntimeError(f"{source.name} could not be keyed")
+    frames[0].save(
+        destination,
+        save_all=True,
+        append_images=frames[1:],
+        duration=84,
+        loop=0,
+        disposal=2,
+        optimize=True,
+    )
+    print(f"{destination.name} {len(frames)} frames {destination.stat().st_size}", flush=True)
+
+
+def keyed_frame(raw: bytes, width: int, height: int) -> Image.Image:
+    count = width * height
+    mask = bytearray(count)
+    queue: deque[int] = deque()
+
+    def is_plate(index: int) -> bool:
+        offset = index * 3
+        red, green, blue = raw[offset], raw[offset + 1], raw[offset + 2]
+        min_channel = red if red < green else green
+        if blue < min_channel:
+            min_channel = blue
+        max_channel = red if red > green else green
+        if blue > max_channel:
+            max_channel = blue
+        return max_channel - min_channel <= 8 and min_channel >= 246
+
+    def push(index: int) -> None:
+        if mask[index] or not is_plate(index):
+            return
+        mask[index] = 1
+        queue.append(index)
+
+    for x in range(width):
+        push(x)
+        push((height - 1) * width + x)
+    for y in range(1, height - 1):
+        push(y * width)
+        push(y * width + width - 1)
+    while queue:
+        index = queue.popleft()
+        x = index % width
+        y = index // width
+        if x > 0:
+            push(index - 1)
+        if x + 1 < width:
+            push(index + 1)
+        if y > 0:
+            push(index - width)
+        if y + 1 < height:
+            push(index + width)
+
+    # The floor shadow sits under the creature and is the same gray family as the plate.
+    # Only grow the mask downward so the bright fur on top is left alone.
+    shadow_top = int(height * 0.72)
+
+    def is_shadow(index: int) -> bool:
+        if index // width < shadow_top:
+            return False
+        offset = index * 3
+        red, green, blue = raw[offset], raw[offset + 1], raw[offset + 2]
+        min_channel = red if red < green else green
+        if blue < min_channel:
+            min_channel = blue
+        max_channel = red if red > green else green
+        if blue > max_channel:
+            max_channel = blue
+        return max_channel - min_channel <= 18 and min_channel >= 150
+
+    shadow_queue: deque[int] = deque()
+    for index in range(max(shadow_top - 1, 0) * width, count):
+        if mask[index]:
+            shadow_queue.append(index)
+    while shadow_queue:
+        index = shadow_queue.popleft()
+        x = index % width
+        y = index // width
+        neighbors = []
+        if x > 0:
+            neighbors.append(index - 1)
+        if x + 1 < width:
+            neighbors.append(index + 1)
+        if y > 0:
+            neighbors.append(index - width)
+        if y + 1 < height:
+            neighbors.append(index + width)
+        for neighbor in neighbors:
+            if not mask[neighbor] and is_shadow(neighbor):
+                mask[neighbor] = 1
+                shadow_queue.append(neighbor)
+
+    pixels = bytearray(count * 4)
+    for index in range(count):
+        offset = index * 3
+        red, green, blue = raw[offset], raw[offset + 1], raw[offset + 2]
+        alpha = 255
+        if mask[index]:
+            alpha = 0
+        else:
+            x = index % width
+            y = index // width
+            touches = (
+                (x > 0 and mask[index - 1])
+                or (x + 1 < width and mask[index + 1])
+                or (y > 0 and mask[index - width])
+                or (y + 1 < height and mask[index + width])
+            )
+            if touches:
+                min_channel = red if red < green else green
+                if blue < min_channel:
+                    min_channel = blue
+                max_channel = red if red > green else green
+                if blue > max_channel:
+                    max_channel = blue
+                if max_channel - min_channel < 22 and min_channel > 230:
+                    alpha = max(0, min(255, (246 - min_channel) * 255 // 26))
+        target = index * 4
+        if alpha == 0:
+            continue
+        pixels[target] = red * alpha // 255
+        pixels[target + 1] = green * alpha // 255
+        pixels[target + 2] = blue * alpha // 255
+        pixels[target + 3] = alpha
+    return Image.frombytes("RGBA", (width, height), bytes(pixels))
+
+
+def export_gifs() -> None:
+    for name in CLIPS:
+        source = MEDIA / f"{name}.mp4"
+        destination = MEDIA / f"{name}.gif"
+        if not source.exists():
+            continue
+        if destination.exists() and destination.stat().st_mtime >= source.stat().st_mtime and destination.stat().st_size > 1000:
+            print(f"{name}.gif already saved", flush=True)
+            continue
+        export_gif(source, destination)
+
+
 def main() -> None:
     BUILD.mkdir(parents=True, exist_ok=True)
     MEDIA.mkdir(parents=True, exist_ok=True)
@@ -228,10 +405,14 @@ def main() -> None:
             except Exception as error:
                 errors.append(str(error))
                 print(f"ERROR {error}", flush=True)
+    export_gifs()
     if errors:
         raise SystemExit(1)
     print("ALL DONE", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    if "--gif-only" in sys.argv:
+        export_gifs()
+    else:
+        main()

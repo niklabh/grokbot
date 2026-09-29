@@ -22,7 +22,7 @@ Chat uses the xAI API model `grok-4.7`. The four clips were generated once with 
 
 3. Open `GrokWatch.xcodeproj` in Xcode.
 4. Select the **GrokWatch** scheme.
-5. For the simulator, pick a watchOS simulator such as **Apple Watch Series 11 (46mm)** and press Run. The simulator uses the on-screen keyboard instead of the microphone.
+5. For the simulator, pick a watchOS simulator such as **Apple Watch Series 11 (46mm)** and press Run. Tap starts the microphone. The simulator often has no mic, so speaking works on a real watch.
 6. For a real watch, pair it with your iPhone, connect the iPhone to this Mac, and turn on Developer Mode on the watch under **Settings > Privacy & Security**. Choose the physical watch as the run destination, sign with your Personal Team, and press Run. A free Apple ID install expires after about 7 days.
 
 The watch needs Wi-Fi, or the iPhone nearby, to reach Grok.
@@ -36,7 +36,9 @@ The watch needs Wi-Fi, or the iPhone nearby, to reach Grok.
 - `GrokWatch/Media/thinking.mp4`
 - `GrokWatch/Media/speaking.mp4`
 
-Clips that already exist are left alone. Delete a file to generate it again. Each new clip spends API credits.
+It also writes a transparent `.gif` loop for each clip, which is what the watch plays. The mp4 files stay on disk for regenerating those loops and are not copied into the app.
+
+Clips that already exist are left alone. Delete a file to generate it again. Each new clip spends API credits. Rebuild the transparent loops without calling the video API with `python3 scripts/generate_clips.py --gif-only`.
 
 ## Secrets
 

@@ -9,11 +9,27 @@ final class FaceModel: NSObject, ObservableObject {
 
     private let speaker = AVSpeechSynthesizer()
     private let session = GrokSession()
+    private let listener = MicListener()
     private var lastReply: String?
 
     override init() {
         super.init()
         speaker.delegate = self
+        listener.onRecorded = { [weak self] url in
+            guard let self else { return }
+            Task { await self.transcribeAndAsk(url) }
+        }
+        listener.onEmpty = { [weak self] in
+            guard let self, self.phase == "listening" else { return }
+            self.phase = "idle"
+            self.caption = self.lastReply ?? "Tap me"
+        }
+        listener.onFailed = { [weak self] in
+            guard let self, self.phase == "listening" else { return }
+            self.phase = "idle"
+            self.caption = "The mic didn't open"
+            WKInterfaceDevice.current().play(.failure)
+        }
     }
 
     func talk() {
@@ -21,35 +37,41 @@ final class FaceModel: NSObject, ObservableObject {
         if speaker.isSpeaking {
             speaker.stopSpeaking(at: .immediate)
         }
+        if phase == "listening" {
+            listener.finish()
+            return
+        }
         WKInterfaceDevice.current().play(.click)
         phase = "listening"
         caption = "Listening"
-        guard let controller = WKApplication.shared().visibleInterfaceController else {
-            phase = "idle"
-            caption = lastReply ?? "The mic didn't open"
-            return
-        }
-        controller.presentTextInputController(withSuggestions: nil, allowedInputMode: .plain) { [weak self] results in
-            let text = (results?.first as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        listener.arm()
+        AVAudioApplication.requestRecordPermission { granted in
             Task { @MainActor in
-                guard let self else { return }
-                guard let text, !text.isEmpty else {
-                    if self.phase == "listening" {
-                        self.phase = "idle"
-                        self.caption = self.lastReply ?? "Tap me"
-                    }
+                guard self.phase == "listening" else { return }
+                guard granted else {
+                    self.phase = "idle"
+                    self.caption = "The mic is off"
                     return
                 }
-                await self.ask(text)
+                self.listener.start()
             }
         }
     }
 
-    private func ask(_ text: String) async {
+    private func transcribeAndAsk(_ url: URL) async {
+        guard phase == "listening" else { return }
         phase = "thinking"
         caption = "Hmm…"
         WKInterfaceDevice.current().play(.start)
+        defer { try? FileManager.default.removeItem(at: url) }
         do {
+            let text = try await session.transcribe(url)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                phase = "idle"
+                caption = lastReply ?? "Tap me"
+                return
+            }
             let answer = try await session.reply(to: text)
             lastReply = answer
             caption = answer
@@ -98,6 +120,29 @@ extension FaceModel: AVSpeechSynthesizerDelegate {
 @MainActor
 private final class GrokSession {
     private var messages: [ChatMessage] = []
+
+    func transcribe(_ file: URL) async throws -> String {
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = URLRequest(url: URL(string: "https://api.x.ai/v1/stt")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("Bearer \(Secrets.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        var body = Data()
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\nen\r\n".utf8))
+        body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"listen.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8))
+        body.append(try Data(contentsOf: file))
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        request.httpBody = body
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            let detail = String(data: data, encoding: .utf8) ?? ""
+            throw GrokError.http(status, String(detail.prefix(300)))
+        }
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return json?["text"] as? String ?? ""
+    }
 
     func reply(to userText: String) async throws -> String {
         messages.append(ChatMessage(role: "user", content: userText))

@@ -1,4 +1,3 @@
-import AVKit
 import SwiftUI
 
 @main
@@ -16,7 +15,7 @@ struct FaceView: View {
 
     var body: some View {
         VStack(spacing: 2) {
-            VideoPlayer(player: clips.player)
+            KeyedClipView(clips: clips)
                 .aspectRatio(512.0 / 592.0, contentMode: .fit)
                 .allowsHitTesting(false)
             Text(model.caption)
